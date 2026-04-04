@@ -1,7 +1,11 @@
 # gflabel-js
 
 A slopcoded TypeScript/WebAssembly port of [gflabel](https://github.com/ndevenish/gflabel) for
-generating 3D-printable Gridfinity labels. Runs as a web app or Node CLI.
+generating 3D-printable Gridfinity labels. Runs as a web app or Node CLI. My intention is that this
+project lives entirely downstream of the "reference" python version, but I'm not completely against
+adding features only here.
+
+Just be aware that the code quality might not be the greated.
 
 Built with [replicad](https://replicad.xyz/) (OpenCascade WASM), [opentype.js](https://opentype.js.org/), React, and Three.js.
 
