@@ -1,8 +1,9 @@
 /**
  * Modern Gridfinity Case label base — port of bases/modern.py.
  *
- * Tapered extrusion simulated via loft between inner and outer profiles.
- * The 45° taper means walls grow by depth/2 from inner to outer.
+ * Tapered extrusion simulated via loft between offset profiles.
+ * The 45° taper means each edge moves inward/outward by depth/2
+ * from the mid-profile (label surface at z=0) to the top/bottom.
  */
 
 import {
@@ -14,110 +15,107 @@ import {
 import type { BaseConfig, LabelBaseResult } from "./base.js";
 import type { Vec2 } from "../label.js";
 
-/** Discrete width mapping (u → mm). */
-const MODERN_WIDTH_MAP: Record<number, number> = {
-  3: 31.8,
-  4: 50.8,
-  5: 75.8,
-  6: 115.8,
-  7: 140.8,
-  8: 140.8,
+/** Internal widths for discrete u-sizes (mm), before margins. */
+const INTERNAL_WIDTHS: Record<number, number> = {
+  3: 16,
+  4: 35,
+  5: 60,
+  6: 100,
+  7: 125,
+  8: 125,
 };
 
-const EXTRA_WIDTH_TOL = 0.317; // mm subtracted from width
-const BODY_WIDTH_TOL = 0.083;
-const CORNER_OFF = 1.8; // corner chamfer length
+const MARGIN_X = 8;
+const MARGIN_Y = 4.7;
+const WINDOW_HEIGHT = 13;
+const INDENT_DEPTH = 0.6;
+const X_OFF_BASE = 0.1;
+const X_OFF_FACE = 0.1415;
+const Y_OFFSET = 0.28284; // top offset from face inset in onshape
 
-/**
- * Draw a rectangle with chamfered top-left and top-right corners.
- * "Top" means positive Y in the profile (the label top edge).
- */
-function chamferedRect(w: number, h: number, cornerOff: number) {
-  const hw = w / 2;
-  const hh = h / 2;
-  // Start bottom-left, go clockwise
-  return draw([-hw, -hh])
-    .lineTo([hw, -hh])
-    .lineTo([hw, hh - cornerOff])
-    .lineTo([hw - cornerOff, hh])
-    .lineTo([-hw + cornerOff, hh])
-    .lineTo([-hw, hh - cornerOff])
+/** Draw the modern base mid-profile (at the label surface, z=0). */
+function modernProfile(wMm: number, hMm: number) {
+  const dx = Math.abs(X_OFF_BASE - X_OFF_FACE);
+  const co = 1.97574; // corner offset, measured after face offset
+  const yo = Y_OFFSET;
+
+  return draw([-wMm / 2 + dx, -hMm / 2])
+    .lineTo([-wMm / 2 + dx, hMm / 2 - co - yo])
+    .lineTo([-wMm / 2 + dx + co, hMm / 2 - yo])
+    .lineTo([wMm / 2 - dx - co, hMm / 2 - yo])
+    .lineTo([wMm / 2 - dx, hMm / 2 - co - yo])
+    .lineTo([wMm / 2 - dx, -hMm / 2])
     .close();
 }
 
 export function buildModernBase(config: BaseConfig): LabelBaseResult {
-  const rawWidth = MODERN_WIDTH_MAP[config.width];
-  if (rawWidth === undefined) {
+  const iw = INTERNAL_WIDTHS[config.width];
+  if (iw === undefined) {
     throw new Error(
       `Modern base only supports widths 3-8u, got ${config.width}u`,
     );
   }
-  const wMm = rawWidth - EXTRA_WIDTH_TOL;
-  const hMm = config.height ?? 22.117157;
+  const wMm = iw + MARGIN_X * 2 - 2 * X_OFF_BASE;
+  const hMm = config.height ?? MARGIN_Y * 2 + WINDOW_HEIGHT; // 22.4
   const depth = config.depth ?? 2.2;
 
-  // Inner profile dimensions (at mid-depth)
-  const wInner = wMm - depth - BODY_WIDTH_TOL;
-  const hInner = hMm - depth;
+  // Window width (for indent = internal width)
+  const wWindow = wMm - MARGIN_X * 2 + 2 * X_OFF_BASE;
 
-  // Outer profile: expanded by depth/2 in each direction
-  const wOuter = wInner + depth;
-  const hOuter = hInner + depth;
+  // --- Taper body ---
+  // Python draws profile at z=0 and extrudes ±depth/2 with 45° taper.
+  // Entire solid is at/behind z=0:
+  //   z=0:        full profile (label surface)
+  //   z=-depth/2: shrunk by depth/2 (narrowest, middle)
+  //   z=-depth:   full profile (back, identical to z=0)
+  const fullProfile = modernProfile(wMm, hMm);
+  const midProfile = fullProfile.offset(-depth / 2);
 
-  // Corner chamfer offset (same proportion for both)
-  const innerCorner = CORNER_OFF * Math.SQRT1_2; // sin(45°)
-  const outerCorner = innerCorner + depth / 2;
+  const frontSketch = fullProfile.sketchOnPlane("XY", 0) as Sketch;
+  const midSketch = midProfile.sketchOnPlane("XY", -depth / 2) as Sketch;
+  const frontHalf = frontSketch.loftWith(midSketch, { ruled: true }) as unknown as Solid;
 
-  // Create sketches at three Z planes
-  const innerProfile = chamferedRect(wInner, hInner, innerCorner);
-  const outerTopProfile = chamferedRect(wOuter, hOuter, outerCorner);
-  const outerBottomProfile = chamferedRect(wOuter, hOuter, outerCorner);
+  const midSketch2 = midProfile.clone().sketchOnPlane("XY", -depth / 2) as Sketch;
+  const backSketch = fullProfile.clone().sketchOnPlane("XY", -depth) as Sketch;
+  const backHalf = midSketch2.loftWith(backSketch, { ruled: true }) as unknown as Solid;
 
-  const topSketch = outerTopProfile.sketchOnPlane("XY", 0) as Sketch;
-  const bottomSketch = outerBottomProfile.sketchOnPlane("XY", -depth) as Sketch;
+  let solid = frontHalf.fuse(backHalf);
 
-  // Loft inner → top and inner → bottom, then fuse
-  // Note: loftWith consumes the sketch, so we create two separate inner sketches
-  const innerSketchTop = innerProfile.sketchOnPlane("XY", -depth / 2) as Sketch;
-  let topHalf = innerSketchTop.loftWith(topSketch, { ruled: true }) as unknown as Solid;
-  const innerSketchBottom = chamferedRect(wInner, hInner, innerCorner).sketchOnPlane("XY", -depth / 2) as Sketch;
-  const bottomHalf = innerSketchBottom.loftWith(bottomSketch, { ruled: true }) as unknown as Solid;
-  let solid = topHalf.fuse(bottomHalf);
+  // --- Base box at bottom edge ---
+  // Python: Box(W_mm, 0.95858 + depth, depth) at (0, -H/2, -depth/2)
+  //         align(CENTER, MIN, CENTER) → Y min at -H/2, Z centered at -depth/2
+  //         → Z spans [-depth, 0]
+  // Chamfer: Z-axis edges at highest Y, length=depth
+  // We draw the XY profile with the chamfer built in, then extrude in Z.
+  const baseBoxH = 0.95858 + depth;
+  const bw = wMm / 2;
+  const baseBoxProfile = draw([-bw, 0])
+    .lineTo([bw, 0])
+    .lineTo([bw, baseBoxH - depth])
+    .lineTo([bw - depth, baseBoxH])
+    .lineTo([-bw + depth, baseBoxH])
+    .lineTo([-bw, baseBoxH - depth])
+    .close();
 
-  // Flat base box at bottom edge: W_mm × depth(Y) × depth(Z)
-  // Python: Box(W_mm, depth, depth) centered at (0, -H_mm/2, -depth/2)
-  // → spans Y: [-hMm/2 - depth/2, -hMm/2 + depth/2], Z: [-depth, 0]
-  // We draw on XY (W_mm × depth), sketch at z=-depth/2, extrude ±depth/2
-  const baseBox = drawRectangle(wMm, depth)
-    .sketchOnPlane("XY", -depth / 2)
-    .extrude(depth / 2) as Solid;
-  const baseBox2 = drawRectangle(wMm, depth)
-    .sketchOnPlane("XY", -depth / 2)
-    .extrude(-depth / 2) as Solid;
-  let baseBoxSolid = baseBox.fuse(baseBox2);
-  // Translate so Y-center is at -hMm/2
+  // Extrude Z from 0 to -depth, translate Y so yMin sits at -hMm/2
+  let baseBoxSolid = baseBoxProfile
+    .sketchOnPlane("XY", 0)
+    .extrude(-depth) as Solid;
   baseBoxSolid = baseBoxSolid.translate([0, -hMm / 2, 0]) as unknown as Solid;
 
-  // Chamfer the top Z-axis edges of the base box (at z=0)
-  try {
-    baseBoxSolid = baseBoxSolid.chamfer(1.2, (e) =>
-      e.inPlane("XY", 0),
-    ) as unknown as Solid;
-  } catch {
-    // Chamfer may fail
-  }
   solid = solid.fuse(baseBoxSolid);
 
-  // Indent slot cut
-  const indentW = wMm - 15.8 + 0.3;
-  const indentH = 13;
-  const indentDepth = 0.6;
-  const indentY = -hMm / 2 + 4.7; // 4.7mm from bottom edge
-
-  const indentSolid = drawRectangle(indentW, indentH)
+  // --- Indent slot cut ---
+  // Python: Box(wWindow, WINDOW_HEIGHT, INDENT_DEPTH) at (0, -H/2+MARGIN_Y, -depth)
+  //         align(CENTER, MIN, MIN) → Y min at -H/2+MARGIN_Y, Z min at -depth
+  const indentSolid = drawRectangle(wWindow, WINDOW_HEIGHT)
     .sketchOnPlane("XY", -depth)
-    .extrude(-indentDepth) as Solid;
-  const indentPositioned = indentSolid.translate([0, indentY + indentH / 2, 0]) as unknown as Solid;
+    .extrude(INDENT_DEPTH) as Solid;
+  const indentPositioned = indentSolid.translate([
+    0,
+    -hMm / 2 + MARGIN_Y + WINDOW_HEIGHT / 2,
+    0,
+  ]) as unknown as Solid;
 
   try {
     solid = solid.cut(indentPositioned);
