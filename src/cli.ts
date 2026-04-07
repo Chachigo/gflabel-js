@@ -174,7 +174,7 @@ async function main() {
     const svgString = drawingToFilledSVG(labelDrawing);
     writeFileSync(outputPath, svgString, "utf-8");
   } else if (ext === ".stl") {
-    const blob = solid.blobSTL();
+    const blob = solid.blobSTL({ tolerance: 0.05, angularTolerance: 5 });
     const buffer = Buffer.from(await blob.arrayBuffer());
     writeFileSync(outputPath, buffer);
   } else if (ext === ".step" || ext === ".stp") {

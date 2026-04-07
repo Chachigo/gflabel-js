@@ -599,7 +599,7 @@ export function ControlPanel({
           </button>
         )}
 
-        <DownloadButtons onEnsureRendered={ensureRendered3D} />
+        <DownloadButtons onEnsureRendered={ensureRendered3D} baseType={baseType} width={width} spec={spec} />
       </div>
     </div>
   );
