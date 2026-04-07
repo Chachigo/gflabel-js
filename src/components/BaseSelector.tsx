@@ -10,7 +10,6 @@ import imgCullenect from "../assets/bases/base_cullenect.png";
 import imgModern from "../assets/bases/base_modern.png";
 import imgNone from "../assets/bases/base_none.png";
 
-const WIP_TYPES: Set<BaseType> = new Set(["modern"]);
 
 const L = (href: string, text: string) =>
   React.createElement("a", {
@@ -189,7 +188,6 @@ export function BaseSelector({ value, onChange, disabled }: Props) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 600 }}>
                     {info.label}
-                    {WIP_TYPES.has(type) ? " (WIP)" : ""}
                   </div>
                   <div style={{ fontSize: 12, color: "#6b7280", lineHeight: 1.4, marginTop: 2 }}>
                     {info.description}
