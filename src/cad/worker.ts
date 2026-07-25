@@ -4,8 +4,9 @@
  * Initializes OpenCascade WASM, then handles RENDER and EXPORT messages.
  */
 
-import { setOC } from "replicad";
-import type { Solid } from "replicad";
+import { setOC, compoundShapes } from "replicad";
+import type { Solid, Drawing } from "replicad";
+import { zipSync, strToU8 } from "fflate";
 import opencascade from "replicad-opencascadejs/src/replicad_single.js";
 import wasmUrl from "replicad-opencascadejs/src/replicad_single.wasm?url";
 
@@ -29,10 +30,14 @@ const fragmentSvgs = import.meta.glob("../assets/fragments/*.svg", {
   query: "?raw",
 }) as Record<string, string>;
 import { LabelRenderer, renderDividedLabel } from "./label.js";
-import { buildBase, extrudeLabel } from "./bases/index.js";
-import type { BaseConfig } from "./bases/index.js";
+import { buildBase, extrudeLabel, extrudeLabelParts } from "./bases/index.js";
+import type { BaseConfig, BaseType, LabelBaseResult } from "./bases/index.js";
 import type { LabelStyle, RenderOptions } from "./options.js";
 import { DEFAULT_RENDER_OPTIONS } from "./options.js";
+import { applyTemplate } from "./batch.js";
+import { makeLabelFilename, makeLabelStem } from "./naming.js";
+import { export3mf, type Part3MF, type Object3MF } from "./export3mf.js";
+import { drawingToFilledSVG } from "./font.js";
 
 // Import fragment index to trigger registrations
 import "./fragments/index.js";
@@ -63,10 +68,36 @@ interface RenderSvgRequest {
 interface ExportRequest {
   id: string;
   type: "EXPORT";
-  format: "stl" | "step" | "svg";
+  format: "stl" | "step" | "svg" | "3mf";
+  /** RGB colours (0-255) for 3MF multi-colour output. */
+  colors?: { base: [number, number, number]; label: [number, number, number] };
 }
 
-type WorkerRequest = RenderRequest | RenderSvgRequest | ExportRequest;
+export type BatchFormat = "stl" | "step" | "svg" | "3mf";
+export type BatchMode = "individual" | "combined";
+
+interface BatchRequest {
+  id: string;
+  type: "BATCH";
+  /** Label spec template with `{{column}}` placeholders. */
+  template: string;
+  /** One record per label — column name → value. */
+  rows: Record<string, string>[];
+  base: BaseConfig;
+  style: LabelStyle;
+  options?: Partial<RenderOptions>;
+  divisions?: number;
+  format: BatchFormat;
+  mode: BatchMode;
+  /** RGB colours (0-255) for 3MF multi-colour output. */
+  colors?: { base: [number, number, number]; label: [number, number, number] };
+  /** Gap between labels in the combined plate (mm). */
+  gapMm?: number;
+  /** Columns in the combined grid; defaults to ~sqrt(n). */
+  columns?: number;
+}
+
+type WorkerRequest = RenderRequest | RenderSvgRequest | ExportRequest | BatchRequest;
 
 interface ReadyResponse {
   type: "READY";
@@ -95,6 +126,13 @@ interface SvgResponse {
   svg: string;
 }
 
+interface BatchProgressResponse {
+  id: string;
+  type: "BATCH_PROGRESS";
+  done: number;
+  total: number;
+}
+
 interface ErrorResponse {
   id: string;
   type: "ERROR";
@@ -108,6 +146,14 @@ interface ErrorResponse {
 
 let lastSolid: Solid | null = null;
 let lastDrawing: import("replicad").Drawing | null = null;
+/** Inputs of the last RENDER, so EXPORT can rebuild coloured parts (3MF). */
+let lastRender: {
+  base: BaseConfig;
+  style: LabelStyle;
+  options: RenderOptions;
+  spec: string;
+  divisions?: number;
+} | null = null;
 
 // ── Init ──────────────────────────────────────────────────────
 
@@ -148,6 +194,200 @@ async function init(): Promise<void> {
   self.postMessage(msg);
 }
 
+// ── Batch helpers ─────────────────────────────────────────────
+
+const MESH_OPTS = { tolerance: 0.05, angularTolerance: 5 };
+
+/** Build the 2D label drawing for a spec within a base, mirroring RENDER. */
+function buildLabelDrawing(
+  spec: string,
+  baseResult: LabelBaseResult,
+  options: RenderOptions,
+  divisions?: number,
+): Drawing {
+  const renderer = new LabelRenderer(options);
+  const specs = spec.split("\0");
+  if (specs.length > 1 || (divisions && divisions > 1)) {
+    return renderDividedLabel(specs, baseResult.area, divisions ?? specs.length, options);
+  }
+  const adjustedArea = {
+    x: baseResult.area.x - options.marginMm * 2,
+    y: baseResult.area.y - options.marginMm * 2,
+  };
+  return renderer.render(specs[0]!, adjustedArea);
+}
+
+/** Mesh a label as separate coloured base/text parts for 3MF export. */
+function labelParts(
+  baseResult: LabelBaseResult,
+  drawing: Drawing,
+  style: LabelStyle,
+  depth: number,
+  baseColor: [number, number, number],
+  labelColor: [number, number, number],
+  offset?: [number, number],
+): Part3MF[] {
+  const { baseBody, labelBody } = extrudeLabelParts(baseResult, drawing, style, depth);
+  const place = (s: Solid): Solid =>
+    offset && (offset[0] || offset[1]) ? (s.translate([offset[0], offset[1], 0]) as Solid) : s;
+
+  const out: Part3MF[] = [];
+  const bm = place(baseBody).mesh(MESH_OPTS);
+  out.push({ mesh: { vertices: bm.vertices, triangles: bm.triangles }, color: baseColor, name: "Base" });
+  if (labelBody) {
+    const lm = place(labelBody).mesh(MESH_OPTS);
+    out.push({ mesh: { vertices: lm.vertices, triangles: lm.triangles }, color: labelColor, name: "Text" });
+  }
+  return out;
+}
+
+/** Ensure a filename is unique within a set, appending -2, -3, … on collision. */
+function uniqueName(name: string, used: Set<string>): string {
+  if (!used.has(name)) { used.add(name); return name; }
+  const dot = name.lastIndexOf(".");
+  const stem = dot >= 0 ? name.slice(0, dot) : name;
+  const ext = dot >= 0 ? name.slice(dot) : "";
+  let n = 2;
+  let candidate = `${stem}-${n}${ext}`;
+  while (used.has(candidate)) candidate = `${stem}-${++n}${ext}`;
+  used.add(candidate);
+  return candidate;
+}
+
+/** Post a completed file back to the main thread (buffer transferred). */
+function sendFile(id: string, bytes: Uint8Array, mimeType: string, filename: string): void {
+  const buffer = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+  const msg: FileResponse = { id, type: "FILE", buffer, mimeType, filename };
+  self.postMessage(msg, { transfer: [buffer] });
+}
+
+async function solidBytes(solid: Solid, format: "stl" | "step"): Promise<Uint8Array> {
+  const blob = format === "stl" ? solid.blobSTL(MESH_OPTS) : solid.blobSTEP();
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+/**
+ * Render every CSV row through the template and package the results, either as
+ * a ZIP of individual files or a single combined plate.
+ */
+async function handleBatch(req: BatchRequest): Promise<void> {
+  const options: RenderOptions = { ...DEFAULT_RENDER_OPTIONS, ...req.options };
+  setActiveFont(options.font.font ?? "open-sans");
+
+  const { rows } = req;
+  const total = rows.length;
+  if (total === 0) throw new Error("No rows to generate");
+
+  const baseColor = req.colors?.base ?? [128, 128, 128];
+  const labelColor = req.colors?.label ?? [30, 30, 30];
+  const gap = req.gapMm ?? 2;
+  const depth = req.base.labelDepth ?? 0.4;
+  const baseType = req.base.baseType as BaseType;
+  const width = req.base.width ?? 1;
+
+  const postProgress = (done: number) => {
+    const msg: BatchProgressResponse = { id: req.id, type: "BATCH_PROGRESS", done, total };
+    self.postMessage(msg);
+  };
+
+  const prepare = (i: number) => {
+    const spec = applyTemplate(req.template, rows[i]!);
+    const baseResult = buildBase({ ...req.base, style: req.style });
+    const drawing = buildLabelDrawing(spec, baseResult, options, req.divisions);
+    return { spec, baseResult, drawing };
+  };
+
+  const stem = `${makeLabelStem(baseType, width, "batch")}-${total}`;
+
+  if (req.mode === "individual") {
+    const files: Record<string, Uint8Array> = {};
+    const used = new Set<string>();
+    for (let i = 0; i < total; i++) {
+      const { spec, baseResult, drawing } = prepare(i);
+      if (!spec.trim()) { postProgress(i + 1); continue; }
+
+      let bytes: Uint8Array;
+      if (req.format === "svg") {
+        bytes = strToU8(drawingToFilledSVG(drawing));
+      } else if (req.format === "3mf") {
+        bytes = export3mf([
+          {
+            name: makeLabelStem(baseType, width, spec),
+            parts: labelParts(baseResult, drawing, req.style, depth, baseColor, labelColor),
+          },
+        ]);
+      } else {
+        const { solid } = extrudeLabel(baseResult, drawing, req.style, depth);
+        bytes = await solidBytes(solid, req.format);
+      }
+
+      const name = uniqueName(makeLabelFilename(baseType, width, spec, req.format), used);
+      files[name] = bytes;
+      postProgress(i + 1);
+    }
+    if (Object.keys(files).length === 0) throw new Error("No non-empty labels to export");
+    sendFile(req.id, zipSync(files, { level: 6 }), "application/zip", `${stem}.zip`);
+    return;
+  }
+
+  // combined: lay labels out in a grid
+  const columns = req.columns && req.columns > 0 ? req.columns : Math.ceil(Math.sqrt(total));
+  let cellW = 0;
+  let cellH = 0;
+  const solids: Solid[] = [];
+  const objects: Object3MF[] = [];
+  let svg: Drawing | null = null;
+
+  for (let i = 0; i < total; i++) {
+    const { spec, baseResult, drawing } = prepare(i);
+    if (!spec.trim()) { postProgress(i + 1); continue; }
+
+    if (cellW === 0) {
+      if (baseResult.solid) {
+        const [min, max] = baseResult.solid.boundingBox.bounds;
+        cellW = max[0] - min[0];
+        cellH = max[1] - min[1];
+      } else {
+        cellW = drawing.boundingBox.width;
+        cellH = drawing.boundingBox.height;
+      }
+    }
+    const dx = (i % columns) * (cellW + gap);
+    const dy = -Math.floor(i / columns) * (cellH + gap);
+
+    if (req.format === "svg") {
+      const t = drawing.translate([dx, dy]);
+      svg = svg ? svg.fuse(t) : t;
+    } else if (req.format === "3mf") {
+      objects.push({
+        name: makeLabelStem(baseType, width, spec),
+        parts: labelParts(baseResult, drawing, req.style, depth, baseColor, labelColor, [dx, dy]),
+      });
+    } else {
+      const { solid } = extrudeLabel(baseResult, drawing, req.style, depth);
+      solids.push((dx || dy ? (solid.translate([dx, dy, 0]) as Solid) : solid));
+    }
+    postProgress(i + 1);
+  }
+
+  if (req.format === "svg") {
+    if (!svg) throw new Error("No non-empty labels to export");
+    sendFile(req.id, strToU8(drawingToFilledSVG(svg)), "image/svg+xml", `${stem}.svg`);
+  } else if (req.format === "3mf") {
+    if (objects.length === 0) throw new Error("No non-empty labels to export");
+    sendFile(req.id, export3mf(objects), "model/3mf", `${stem}.3mf`);
+  } else {
+    if (solids.length === 0) throw new Error("No non-empty labels to export");
+    const combined =
+      solids.length === 1 ? solids[0]! : (compoundShapes(solids) as unknown as Solid);
+    const mime = req.format === "stl" ? "model/stl" : "model/step";
+    sendFile(req.id, await solidBytes(combined, req.format), mime, `${stem}.${req.format}`);
+  }
+}
+
 // ── Message Handler ──────────────────────────────────────────
 
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
@@ -161,6 +401,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       };
 
       setActiveFont(options.font.font ?? "open-sans");
+
+      lastRender = { base: req.base, style: req.style, options, spec: req.spec, divisions: req.divisions };
 
       // Build the base (pass style so pred base can create recess for embossed)
       const baseResult = buildBase({ ...req.base, style: req.style });
@@ -263,7 +505,6 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
 
       lastDrawing = labelDrawing;
 
-      const { drawingToFilledSVG } = await import("./font.js");
       const svgString = drawingToFilledSVG(labelDrawing);
 
       const msg: SvgResponse = {
@@ -295,11 +536,25 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         if (!lastDrawing) {
           throw new Error("No drawing to export — render first");
         }
-        const { drawingToFilledSVG } = await import("./font.js");
         const svgString = drawingToFilledSVG(lastDrawing);
         buffer = new TextEncoder().encode(svgString).buffer;
         mimeType = "image/svg+xml";
         filename = "label.svg";
+      } else if (req.format === "3mf") {
+        if (!lastRender) {
+          throw new Error("No label to export — render first");
+        }
+        const { base, style, options, spec, divisions } = lastRender;
+        const baseResult = buildBase({ ...base, style });
+        const drawing = buildLabelDrawing(spec, baseResult, options, divisions);
+        const baseColor = req.colors?.base ?? [128, 128, 128];
+        const labelColor = req.colors?.label ?? [30, 30, 30];
+        const parts = labelParts(baseResult, drawing, style, base.labelDepth ?? 0.4, baseColor, labelColor);
+        const name = makeLabelStem(base.baseType as BaseType, base.width ?? 1, spec.split("\0")[0] ?? spec);
+        const bytes = export3mf([{ name, parts }]);
+        buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+        mimeType = "model/3mf";
+        filename = "label.3mf";
       } else {
         throw new Error(`Unknown export format: ${req.format}`);
       }
@@ -312,6 +567,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         filename,
       };
       self.postMessage(msg, { transfer: [buffer] });
+    } else if (req.type === "BATCH") {
+      await handleBatch(req);
     }
   } catch (err) {
     const msg: ErrorResponse = {

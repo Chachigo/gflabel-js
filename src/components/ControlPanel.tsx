@@ -4,6 +4,7 @@ import { BaseSizeControls, defaultWidth } from "./BaseSizeControls.js";
 import { LabelSpecInput } from "./LabelSpecInput.js";
 import { FragmentPalette } from "./FragmentPalette.js";
 import { DownloadButtons } from "./DownloadButtons.js";
+import { BatchPanel } from "./BatchPanel.js";
 import { renderLabel, renderSVG, ensureReady } from "../cad/workerClient.js";
 import type { MeshData } from "../cad/workerClient.js";
 import { LabelStyle, FontStyle } from "../cad/options.js";
@@ -250,6 +251,7 @@ export function ControlPanel({
   const handleRender = doRender;
 
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
+  const [batchOpen, setBatchOpen] = React.useState(false);
   const baseZoneRef = React.useRef<HTMLDivElement>(null);
 
   return (
@@ -600,7 +602,40 @@ export function ControlPanel({
         )}
 
         <DownloadButtons onEnsureRendered={ensureRendered3D} baseType={baseType} width={width} spec={spec} />
+
+        <button
+          onClick={() => setBatchOpen(true)}
+          disabled={!workerReady}
+          title="Générer des étiquettes en masse depuis un CSV"
+          style={{
+            padding: "8px 12px",
+            background: "#fff",
+            color: workerReady ? "#2563eb" : "#94a3b8",
+            border: `1px solid ${workerReady ? "#2563eb" : "#cbd5e1"}`,
+            borderRadius: 6,
+            cursor: workerReady ? "pointer" : "not-allowed",
+            fontSize: 13,
+            fontWeight: 600,
+          }}
+        >
+          Génération en masse (CSV → 3MF/STL…)
+        </button>
       </div>
+
+      {batchOpen && (
+        <BatchPanel
+          onClose={() => setBatchOpen(false)}
+          baseType={baseType}
+          width={width}
+          height={height}
+          version={version}
+          depth={depth}
+          labelDepth={labelDepth}
+          style={style}
+          font={font}
+          initialTemplate={spec}
+        />
+      )}
     </div>
   );
 }

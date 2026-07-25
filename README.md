@@ -98,6 +98,27 @@ Use `\n` in the label spec for multiple lines:
 npx tsx src/cli.ts pred '{bolt(20)}\nM2x20'
 ```
 
+## Bulk Generation (Web App)
+
+Click **"Génération en masse (CSV → 3MF/STL…)"** in the control panel to generate many
+labels at once from a template and a CSV file.
+
+- **Template** — an ordinary label spec plus `{{column}}` placeholders (double braces, so they
+  never clash with `{fragment}` syntax), e.g. `{nut}{{taille}}\n{{ref}}`.
+- **Data** — paste or upload a CSV whose first row is the column names. Each following row
+  becomes one label.
+- **Output** — either individual files bundled in a `.zip`, or a single combined "plate"
+  laying all labels out in a grid.
+- **Formats** — 3MF, STL, STEP, or SVG.
+- **3MF multi-colour** — the base and the text are exported as separate parts, each assigned to
+  its own **filament slot** (`extruder`) via a PrusaSlicer/OrcaSlicer model config. Drop the
+  `.3mf` into your slicer and the two colours land on two filaments automatically — no hand
+  painting. On a combined plate each label is its own movable object. Works best with the
+  **embedded** (or embossed) style; **debossed** carves the text as a void so there is no
+  separate body to colour.
+
+The single-label **3MF** button in the Export row does the same for one label.
+
 ## Label Styles
 
 - **Embossed** — Text raised above the label surface
