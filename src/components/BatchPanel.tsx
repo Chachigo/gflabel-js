@@ -1,6 +1,7 @@
 import React from "react";
 import { batchExport, type BatchFormat, type BatchMode } from "../cad/workerClient.js";
 import { parseCSV, extractPlaceholders, type ParsedCsv } from "../cad/batch.js";
+import { hexToRgb, type PreviewColors } from "../color.js";
 import { LabelStyle, FontStyle } from "../cad/options.js";
 import type { BaseConfig, BaseType } from "../cad/bases/base.js";
 
@@ -16,13 +17,8 @@ interface Props {
   font: string;
   /** Current label spec — used as the initial template. */
   initialTemplate: string;
-}
-
-function hexToRgb(hex: string): [number, number, number] {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
-  if (!m) return [128, 128, 128];
-  const n = parseInt(m[1]!, 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  /** Base/label colours from the preview — used as the initial 3MF colours. */
+  initialColors: PreviewColors;
 }
 
 const FORMATS: { value: BatchFormat; label: string }[] = [
@@ -43,13 +39,14 @@ export function BatchPanel({
   style,
   font,
   initialTemplate,
+  initialColors,
 }: Props) {
   const [template, setTemplate] = React.useState(initialTemplate);
   const [csvText, setCsvText] = React.useState("");
   const [format, setFormat] = React.useState<BatchFormat>("3mf");
   const [mode, setMode] = React.useState<BatchMode>("individual");
-  const [baseColor, setBaseColor] = React.useState("#9aa0a6");
-  const [textColor, setTextColor] = React.useState("#1a1a1a");
+  const [baseColor, setBaseColor] = React.useState(initialColors.base);
+  const [textColor, setTextColor] = React.useState(initialColors.label);
   const [gapMm, setGapMm] = React.useState(2);
   const [columns, setColumns] = React.useState<number>(0);
   const [progress, setProgress] = React.useState<{ done: number; total: number } | null>(null);
@@ -118,7 +115,7 @@ export function BatchPanel({
   const is3mf = format === "3mf";
   const isCombined = mode === "combined";
 
-  const labelStyle: React.CSSProperties = { display: "block", fontSize: 12, fontWeight: 600, marginBottom: 4, color: "#374151" };
+  const labelStyle: React.CSSProperties = { display: "block", fontSize: 12, fontWeight: 600, marginBottom: 4, color: "var(--text-2)" };
   const fieldRow: React.CSSProperties = { display: "flex", gap: 12, flexWrap: "wrap" };
 
   return (
@@ -137,7 +134,8 @@ export function BatchPanel({
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: "#fff",
+          background: "var(--panel)",
+          color: "var(--text)",
           borderRadius: 10,
           width: 640,
           maxWidth: "92vw",
@@ -154,14 +152,14 @@ export function BatchPanel({
           <h2 style={{ margin: 0, fontSize: 18 }}>Génération en masse</h2>
           <button
             onClick={onClose}
-            style={{ border: "none", background: "none", fontSize: 22, cursor: "pointer", color: "#6b7280", lineHeight: 1 }}
+            style={{ border: "none", background: "none", fontSize: 22, cursor: "pointer", color: "var(--text-3)", lineHeight: 1 }}
             aria-label="Fermer"
           >
             ×
           </button>
         </div>
 
-        <p style={{ margin: 0, fontSize: 13, color: "#6b7280" }}>
+        <p style={{ margin: 0, fontSize: 13, color: "var(--text-3)" }}>
           Chaque ligne du CSV devient une étiquette. Utilisez <code>{"{{colonne}}"}</code> dans le
           template pour insérer les valeurs (la 1re ligne du CSV = les noms de colonnes).
         </p>
@@ -175,7 +173,7 @@ export function BatchPanel({
             rows={2}
             style={{ width: "100%", boxSizing: "border-box", padding: 8, fontFamily: "monospace", fontSize: 13, resize: "vertical" }}
           />
-          <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>
+          <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 4 }}>
             {placeholders.length > 0 ? (
               <>Variables : {placeholders.map((p) => <code key={p} style={{ marginRight: 6 }}>{`{{${p}}}`}</code>)}</>
             ) : (
@@ -197,7 +195,7 @@ export function BatchPanel({
           />
           {parsed.rows.length > 0 && (
             <div style={{ marginTop: 8, overflowX: "auto" }}>
-              <div style={{ fontSize: 12, color: "#374151", marginBottom: 4 }}>
+              <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 4 }}>
                 {parsed.rows.length} ligne(s) · colonnes : {parsed.headers.join(", ")}
               </div>
               <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
@@ -211,12 +209,12 @@ export function BatchPanel({
                 </tbody>
               </table>
               {parsed.rows.length > previewRows.length && (
-                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>… +{parsed.rows.length - previewRows.length} autres</div>
+                <div style={{ fontSize: 11, color: "var(--text-4)", marginTop: 2 }}>… +{parsed.rows.length - previewRows.length} autres</div>
               )}
             </div>
           )}
           {missingColumns.length > 0 && (
-            <div style={{ marginTop: 6, fontSize: 12, color: "#b45309" }}>
+            <div style={{ marginTop: 6, fontSize: 12, color: "var(--warning)" }}>
               ⚠ Variables sans colonne correspondante (seront vides) : {missingColumns.join(", ")}
             </div>
           )}
@@ -252,10 +250,10 @@ export function BatchPanel({
                 <input type="color" value={textColor} onChange={(e) => setTextColor(e.target.value)} style={{ width: 60, height: 32 }} />
               </div>
             </div>
-            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
+            <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 6 }}>
               Le 3MF sépare la base et le texte en deux corps colorés à assigner aux filaments — sans peinture.
               {style === LabelStyle.DEBOSSED && (
-                <span style={{ color: "#b45309" }}> Le style « debossed » creuse le texte (pas de corps texte à colorer) : préférez « embedded » ou « embossed ».</span>
+                <span style={{ color: "var(--warning)" }}> Le style « debossed » creuse le texte (pas de corps texte à colorer) : préférez « embedded » ou « embossed ».</span>
               )}
             </div>
           </div>
@@ -275,22 +273,22 @@ export function BatchPanel({
           </div>
         )}
 
-        {error && <div style={{ fontSize: 13, color: "#dc2626" }}>{error}</div>}
+        {error && <div style={{ fontSize: 13, color: "var(--danger)" }}>{error}</div>}
 
         {/* Progress */}
         {progress && (
           <div>
-            <div style={{ fontSize: 12, color: "#374151", marginBottom: 4 }}>
+            <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 4 }}>
               Rendu {progress.done} / {progress.total}…
             </div>
-            <div style={{ height: 8, background: "#e5e7eb", borderRadius: 4, overflow: "hidden" }}>
-              <div style={{ height: "100%", width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%`, background: "#2563eb", transition: "width 0.2s" }} />
+            <div style={{ height: 8, background: "var(--divider)", borderRadius: 4, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%`, background: "var(--accent)", transition: "width 0.2s" }} />
             </div>
           </div>
         )}
 
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button onClick={onClose} disabled={busy} style={{ padding: "10px 16px", border: "1px solid #d1d5db", background: "#f9fafb", borderRadius: 6, cursor: busy ? "not-allowed" : "pointer", fontSize: 14 }}>
+          <button onClick={onClose} disabled={busy} style={{ padding: "10px 16px", border: "1px solid var(--border)", background: "var(--muted-surface)", color: "var(--text)", borderRadius: 6, cursor: busy ? "not-allowed" : "pointer", fontSize: 14 }}>
             Fermer
           </button>
           <button
@@ -299,8 +297,8 @@ export function BatchPanel({
             style={{
               padding: "10px 20px",
               border: "none",
-              background: busy || parsed.rows.length === 0 ? "#94a3b8" : "#2563eb",
-              color: "#fff",
+              background: busy || parsed.rows.length === 0 ? "var(--text-disabled)" : "var(--accent)",
+              color: "var(--on-accent)",
               borderRadius: 6,
               cursor: busy || parsed.rows.length === 0 ? "not-allowed" : "pointer",
               fontSize: 14,
@@ -317,10 +315,10 @@ export function BatchPanel({
 
 function cellStyle(header: boolean): React.CSSProperties {
   return {
-    border: "1px solid #e5e7eb",
+    border: "1px solid var(--divider)",
     padding: "3px 8px",
     textAlign: "left",
-    background: header ? "#f3f4f6" : "#fff",
+    background: header ? "var(--inset)" : "var(--panel)",
     fontWeight: header ? 600 : 400,
     whiteSpace: "nowrap",
     maxWidth: 200,

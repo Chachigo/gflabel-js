@@ -141,15 +141,18 @@ export async function renderSVG(params: {
 }
 
 /**
- * Export the last rendered solid to a file.
+ * Export the last rendered solid to a file. For 3MF, `colors` sets the base and
+ * label filament colours (falls back to the worker's defaults when omitted).
  */
 export async function exportFile(
   format: "stl" | "step" | "svg" | "3mf",
+  colors?: { base: [number, number, number]; label: [number, number, number] },
 ): Promise<FileData> {
   await waitReady();
   const result = (await send({
     type: "EXPORT",
     format,
+    colors,
   })) as { type: "FILE"; buffer: ArrayBuffer; mimeType: string; filename: string };
   return {
     buffer: result.buffer,

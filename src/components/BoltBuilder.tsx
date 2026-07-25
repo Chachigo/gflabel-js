@@ -69,9 +69,10 @@ function buildSpec(
 
 const pillBtn: React.CSSProperties = {
   padding: "3px 8px",
-  border: "1px solid #d1d5db",
+  border: "1px solid var(--border)",
   borderRadius: 4,
-  background: "#f9fafb",
+  background: "var(--muted-surface)",
+  color: "var(--text)",
   cursor: "pointer",
   fontSize: 11,
   lineHeight: "18px",
@@ -79,9 +80,9 @@ const pillBtn: React.CSSProperties = {
 
 const pillBtnActive: React.CSSProperties = {
   ...pillBtn,
-  background: "#2563eb",
-  borderColor: "#2563eb",
-  color: "#fff",
+  background: "var(--accent)",
+  borderColor: "var(--accent)",
+  color: "var(--on-accent)",
 };
 
 const iconBtn: React.CSSProperties = {
@@ -91,16 +92,16 @@ const iconBtn: React.CSSProperties = {
   width: 28,
   height: 28,
   padding: 2,
-  border: "1px solid #d1d5db",
+  border: "1px solid var(--border)",
   borderRadius: 4,
-  background: "#f9fafb",
+  background: "var(--muted-surface)",
   cursor: "pointer",
 };
 
 const iconBtnActive: React.CSSProperties = {
   ...iconBtn,
-  background: "#2563eb",
-  borderColor: "#2563eb",
+  background: "var(--accent)",
+  borderColor: "var(--accent)",
 };
 
 const rowStyle: React.CSSProperties = {
@@ -112,7 +113,7 @@ const rowStyle: React.CSSProperties = {
 
 const labelStyle: React.CSSProperties = {
   fontSize: 11,
-  color: "#6b7280",
+  color: "var(--text-3)",
   width: 40,
   flexShrink: 0,
 };
@@ -175,9 +176,9 @@ export function BoltBuilder({ insertAtCursorRef }: BoltBuilderProps) {
       {/* SVG Preview */}
       <div
         style={{
-          border: "1px solid #e5e7eb",
+          border: "1px solid var(--divider)",
           borderRadius: 4,
-          background: "#fff",
+          background: "var(--svg-surface)",
           padding: 4,
           minHeight: 36,
           display: "flex",
@@ -206,7 +207,7 @@ export function BoltBuilder({ insertAtCursorRef }: BoltBuilderProps) {
             }}
           />
         ) : (
-          <span style={{ fontSize: 10, color: "#9ca3af" }}>
+          <span style={{ fontSize: 10, color: "var(--text-4)" }}>
             {rendering ? "Rendering..." : "No preview"}
           </span>
         )}
@@ -229,7 +230,7 @@ export function BoltBuilder({ insertAtCursorRef }: BoltBuilderProps) {
         </button>
         {mode === "bolt" && (
           <>
-            <span style={{ fontSize: 11, color: "#6b7280", marginLeft: "auto" }}>Length</span>
+            <span style={{ fontSize: 11, color: "var(--text-3)", marginLeft: "auto" }}>Length</span>
             <input
               type="number"
               min={1}
@@ -239,7 +240,7 @@ export function BoltBuilder({ insertAtCursorRef }: BoltBuilderProps) {
               style={{
                 width: 72,
                 padding: "2px 4px",
-                border: "1px solid #d1d5db",
+                border: "1px solid var(--border)",
                 borderRadius: 4,
                 fontSize: 12,
                 boxSizing: "border-box",
@@ -334,9 +335,9 @@ export function BoltBuilder({ insertAtCursorRef }: BoltBuilderProps) {
             flex: 1,
             fontSize: 11,
             padding: "3px 6px",
-            background: "#f3f4f6",
+            background: "var(--inset)",
             borderRadius: 3,
-            color: "#374151",
+            color: "var(--text-2)",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -348,10 +349,10 @@ export function BoltBuilder({ insertAtCursorRef }: BoltBuilderProps) {
           onClick={() => insertAtCursorRef.current?.(spec)}
           style={{
             padding: "3px 10px",
-            border: "1px solid #2563eb",
+            border: "1px solid var(--accent)",
             borderRadius: 4,
-            background: "#2563eb",
-            color: "#fff",
+            background: "var(--accent)",
+            color: "var(--on-accent)",
             cursor: "pointer",
             fontSize: 11,
             fontWeight: 600,

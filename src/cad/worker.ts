@@ -155,6 +155,35 @@ let lastRender: {
   divisions?: number;
 } | null = null;
 
+/**
+ * Free a replicad shape's underlying OpenCascade (WASM) memory immediately.
+ *
+ * replicad frees each OC object via a `FinalizationRegistry`, but that only
+ * fires on JS GC — and the tiny JS wrappers exert almost no memory pressure
+ * while each solid holds megabytes in the WASM heap, so cleanup lags far behind
+ * allocation and the heap balloons (the app feels progressively slower).
+ * Deleting the shapes we're done with eagerly keeps the WASM heap flat across
+ * many renders. Guarded so a double-delete (already-freed object) is a no-op,
+ * and `delete` optional so it accepts wrappers that lack one.
+ */
+function safeDelete(obj: { delete?: () => void } | null | undefined): void {
+  try {
+    obj?.delete?.();
+  } catch {
+    // already deleted or not deletable
+  }
+}
+
+/**
+ * Free a Drawing's 2D geometry. The Drawing wrapper has no delete() of its own,
+ * but its innerShape (a Blueprint) does — freeing it eagerly avoids piling up
+ * curve data during large batch exports.
+ */
+function safeDeleteDrawing(d: Drawing | null | undefined): void {
+  const inner = (d as unknown as { innerShape?: { delete?: () => void } | null })?.innerShape;
+  safeDelete(inner);
+}
+
 // ── Init ──────────────────────────────────────────────────────
 
 async function init(): Promise<void> {
@@ -231,12 +260,20 @@ function labelParts(
   const place = (s: Solid): Solid =>
     offset && (offset[0] || offset[1]) ? (s.translate([offset[0], offset[1], 0]) as Solid) : s;
 
+  // Mesh each body into plain JS arrays (copied out of WASM), then free the
+  // solids — including any translated copy `place()` produced.
   const out: Part3MF[] = [];
-  const bm = place(baseBody).mesh(MESH_OPTS);
+  const basePlaced = place(baseBody);
+  const bm = basePlaced.mesh(MESH_OPTS);
   out.push({ mesh: { vertices: bm.vertices, triangles: bm.triangles }, color: baseColor, name: "Base" });
+  if (basePlaced !== baseBody) safeDelete(basePlaced);
+  safeDelete(baseBody);
   if (labelBody) {
-    const lm = place(labelBody).mesh(MESH_OPTS);
+    const labelPlaced = place(labelBody);
+    const lm = labelPlaced.mesh(MESH_OPTS);
     out.push({ mesh: { vertices: lm.vertices, triangles: lm.triangles }, color: labelColor, name: "Text" });
+    if (labelPlaced !== labelBody) safeDelete(labelPlaced);
+    safeDelete(labelBody);
   }
   return out;
 }
@@ -322,7 +359,12 @@ async function handleBatch(req: BatchRequest): Promise<void> {
       } else {
         const { solid } = extrudeLabel(baseResult, drawing, req.style, depth);
         bytes = await solidBytes(solid, req.format);
+        safeDelete(solid);
       }
+
+      // Free this row's shapes so a large CSV can't balloon the WASM heap.
+      safeDeleteDrawing(drawing);
+      safeDelete(baseResult.solid);
 
       const name = uniqueName(makeLabelFilename(baseType, width, spec, req.format), used);
       files[name] = bytes;
@@ -359,8 +401,15 @@ async function handleBatch(req: BatchRequest): Promise<void> {
     const dy = -Math.floor(i / columns) * (cellH + gap);
 
     if (req.format === "svg") {
-      const t = drawing.translate([dx, dy]);
-      svg = svg ? svg.fuse(t) : t;
+      const t = drawing.translate([dx, dy]) as Drawing;
+      if (svg) {
+        const prev = svg;
+        svg = svg.fuse(t);
+        safeDeleteDrawing(prev);
+        safeDeleteDrawing(t);
+      } else {
+        svg = t;
+      }
     } else if (req.format === "3mf") {
       objects.push({
         name: makeLabelStem(baseType, width, spec),
@@ -368,14 +417,24 @@ async function handleBatch(req: BatchRequest): Promise<void> {
       });
     } else {
       const { solid } = extrudeLabel(baseResult, drawing, req.style, depth);
-      solids.push((dx || dy ? (solid.translate([dx, dy, 0]) as Solid) : solid));
+      if (dx || dy) {
+        solids.push(solid.translate([dx, dy, 0]) as Solid);
+        safeDelete(solid); // keep only the translated copy
+      } else {
+        solids.push(solid);
+      }
     }
+
+    // Free per-row shapes not retained for the combined output.
+    safeDeleteDrawing(drawing);
+    safeDelete(baseResult.solid);
     postProgress(i + 1);
   }
 
   if (req.format === "svg") {
     if (!svg) throw new Error("No non-empty labels to export");
     sendFile(req.id, strToU8(drawingToFilledSVG(svg)), "image/svg+xml", `${stem}.svg`);
+    safeDeleteDrawing(svg);
   } else if (req.format === "3mf") {
     if (objects.length === 0) throw new Error("No non-empty labels to export");
     sendFile(req.id, export3mf(objects), "model/3mf", `${stem}.3mf`);
@@ -385,6 +444,8 @@ async function handleBatch(req: BatchRequest): Promise<void> {
       solids.length === 1 ? solids[0]! : (compoundShapes(solids) as unknown as Solid);
     const mime = req.format === "stl" ? "model/stl" : "model/step";
     sendFile(req.id, await solidBytes(combined, req.format), mime, `${stem}.${req.format}`);
+    for (const s of solids) safeDelete(s);
+    if (combined !== solids[0]) safeDelete(combined);
   }
 }
 
@@ -401,6 +462,13 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       };
 
       setActiveFont(options.font.font ?? "open-sans");
+
+      // Release the previous render's retained WASM shapes before building new
+      // ones (module-level refs are never reclaimed by the FinalizationRegistry).
+      safeDelete(lastSolid);
+      lastSolid = null;
+      safeDeleteDrawing(lastDrawing);
+      lastDrawing = null;
 
       lastRender = { base: req.base, style: req.style, options, spec: req.spec, divisions: req.divisions };
 
@@ -437,6 +505,10 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         req.base.labelDepth ?? 0.4,
       );
       lastSolid = extrudeResult.solid;
+
+      // The base solid was an input to the boolean op; the final solid is a new
+      // shape, so free the base to keep per-render WASM usage flat.
+      if (baseResult.solid && baseResult.solid !== lastSolid) safeDelete(baseResult.solid);
 
       // Generate mesh for preview
       const mesh = extrudeResult.solid.mesh({ tolerance: 0.05, angularTolerance: 5 });
@@ -480,6 +552,11 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
 
       setActiveFont(options.font.font ?? "open-sans");
 
+      // Release the previous drawing before building a new one (this path runs
+      // often — e.g. the bolt builder re-renders an SVG every 300ms).
+      safeDeleteDrawing(lastDrawing);
+      lastDrawing = null;
+
       // Build the base only for area dimensions
       const baseResult = buildBase({ ...req.base, style: req.style });
 
@@ -504,6 +581,9 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       }
 
       lastDrawing = labelDrawing;
+
+      // The base solid is only built for its area here — free it.
+      safeDelete(baseResult.solid);
 
       const svgString = drawingToFilledSVG(labelDrawing);
 
