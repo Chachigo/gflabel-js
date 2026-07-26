@@ -237,7 +237,10 @@ export function ControlPanel({
   const doRenderRef = React.useRef(doRender);
   React.useEffect(() => { doRenderRef.current = doRender; }, [doRender]);
 
-  // Auto-render: debounced in SVG mode on input changes, immediate on mode switch
+  // Auto-render: wait for a pause in edits before generating, but switch preview
+  // mode immediately. Each edit resets the timer (cleanup clears the previous
+  // one), so generation only fires ~2s after the last change.
+  const AUTO_RENDER_DELAY_MS = 2000;
   const prevModeRef = React.useRef(previewMode);
   React.useEffect(() => {
     const modeChanged = prevModeRef.current !== previewMode;
@@ -246,7 +249,7 @@ export function ControlPanel({
     if (!workerReady || !spec.trim()) return;
     if (!autoRender && !modeChanged) return;
 
-    const delay = modeChanged ? 0 : previewMode === "svg" ? 300 : 600;
+    const delay = modeChanged ? 0 : AUTO_RENDER_DELAY_MS;
     const timer = setTimeout(() => {
       doRenderRef.current();
     }, delay);
