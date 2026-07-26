@@ -232,6 +232,12 @@ registerFragment(["box"], (inWidth: string, inHeight?: string) => {
     ): FragmentRenderResult {
       const w = parseFloat(inWidth);
       const h = inHeight ? parseFloat(inHeight) : height;
+      if (!Number.isFinite(w) || !Number.isFinite(h)) {
+        throw new Error(
+          `Invalid box size — expected numbers, e.g. {box(10,5)}. ` +
+            `In a batch template, insert a column with {{name}}.`,
+        );
+      }
       const drawing = drawRectangle(w, h);
       return { drawing, width: w };
     }
@@ -289,6 +295,12 @@ function parseBoltFeatures(reqFeatures: string[]): {
 
 registerFragment(["bolt"], (lengthStr: string, ...features: string[]) => {
   const boltLength = parseFloat(lengthStr);
+  if (!Number.isFinite(boltLength)) {
+    throw new Error(
+      `Invalid bolt length ${JSON.stringify(lengthStr)} — expected a number, e.g. {bolt(20)}. ` +
+        `In a batch template, insert a column with {{name}}, e.g. {bolt({{length}})}.`,
+    );
+  }
   const { headshape, modifiers, slotted, flanged } =
     parseBoltFeatures(features);
 
