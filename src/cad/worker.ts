@@ -4,7 +4,7 @@
  * Initializes OpenCascade WASM, then handles RENDER and EXPORT messages.
  */
 
-import { setOC, compoundShapes } from "replicad";
+import { setOC, getOC, compoundShapes } from "replicad";
 import type { Solid, Drawing } from "replicad";
 import { zipSync, strToU8 } from "fflate";
 import opencascade from "replicad-opencascadejs/src/replicad_single.js";
@@ -184,6 +184,28 @@ function safeDeleteDrawing(d: Drawing | null | undefined): void {
   safeDelete(inner);
 }
 
+/**
+ * Turn a thrown value into a readable message. OpenCascade/Emscripten surface
+ * C++ exceptions as a raw pointer number (which changes every run), so plain
+ * `String(err)` shows a meaningless number — recover the real message when the
+ * runtime exposes it, otherwise return a clear CAD-engine notice.
+ */
+function formatError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "number") {
+    try {
+      const oc = getOC() as unknown as { getExceptionMessage?: (p: number) => unknown };
+      const raw = oc.getExceptionMessage?.(err);
+      const text = Array.isArray(raw) ? raw.filter(Boolean).join(": ") : String(raw ?? "");
+      if (text && text !== "undefined") return text;
+    } catch {
+      // OC runtime unavailable or no exception helper — fall through
+    }
+    return "the CAD engine could not build this geometry";
+  }
+  return String(err);
+}
+
 // ── Init ──────────────────────────────────────────────────────
 
 async function init(): Promise<void> {
@@ -330,11 +352,10 @@ async function handleBatch(req: BatchRequest): Promise<void> {
     self.postMessage(msg);
   };
 
-  const prepare = (i: number) => {
-    const spec = applyTemplate(req.template, rows[i]!);
+  const buildRow = (spec: string) => {
     const baseResult = buildBase({ ...req.base, style: req.style });
     const drawing = buildLabelDrawing(spec, baseResult, options, req.divisions);
-    return { spec, baseResult, drawing };
+    return { baseResult, drawing };
   };
 
   const stem = `${makeLabelStem(baseType, width, "batch")}-${total}`;
@@ -343,31 +364,36 @@ async function handleBatch(req: BatchRequest): Promise<void> {
     const files: Record<string, Uint8Array> = {};
     const used = new Set<string>();
     for (let i = 0; i < total; i++) {
-      const { spec, baseResult, drawing } = prepare(i);
+      const spec = applyTemplate(req.template, rows[i]!);
       if (!spec.trim()) { postProgress(i + 1); continue; }
+      try {
+        const { baseResult, drawing } = buildRow(spec);
 
-      let bytes: Uint8Array;
-      if (req.format === "svg") {
-        bytes = strToU8(drawingToFilledSVG(drawing));
-      } else if (req.format === "3mf") {
-        bytes = export3mf([
-          {
-            name: makeLabelStem(baseType, width, spec),
-            parts: labelParts(baseResult, drawing, req.style, depth, baseColor, labelColor),
-          },
-        ]);
-      } else {
-        const { solid } = extrudeLabel(baseResult, drawing, req.style, depth);
-        bytes = await solidBytes(solid, req.format);
-        safeDelete(solid);
+        let bytes: Uint8Array;
+        if (req.format === "svg") {
+          bytes = strToU8(drawingToFilledSVG(drawing));
+        } else if (req.format === "3mf") {
+          bytes = export3mf([
+            {
+              name: makeLabelStem(baseType, width, spec),
+              parts: labelParts(baseResult, drawing, req.style, depth, baseColor, labelColor),
+            },
+          ]);
+        } else {
+          const { solid } = extrudeLabel(baseResult, drawing, req.style, depth);
+          bytes = await solidBytes(solid, req.format);
+          safeDelete(solid);
+        }
+
+        // Free this row's shapes so a large CSV can't balloon the WASM heap.
+        safeDeleteDrawing(drawing);
+        safeDelete(baseResult.solid);
+
+        const name = uniqueName(makeLabelFilename(baseType, width, spec, req.format), used);
+        files[name] = bytes;
+      } catch (e) {
+        throw new Error(`Row ${i + 1} ("${spec}"): could not generate — ${formatError(e)}`);
       }
-
-      // Free this row's shapes so a large CSV can't balloon the WASM heap.
-      safeDeleteDrawing(drawing);
-      safeDelete(baseResult.solid);
-
-      const name = uniqueName(makeLabelFilename(baseType, width, spec, req.format), used);
-      files[name] = bytes;
       postProgress(i + 1);
     }
     if (Object.keys(files).length === 0) throw new Error("No non-empty labels to export");
@@ -384,50 +410,55 @@ async function handleBatch(req: BatchRequest): Promise<void> {
   let svg: Drawing | null = null;
 
   for (let i = 0; i < total; i++) {
-    const { spec, baseResult, drawing } = prepare(i);
+    const spec = applyTemplate(req.template, rows[i]!);
     if (!spec.trim()) { postProgress(i + 1); continue; }
+    try {
+      const { baseResult, drawing } = buildRow(spec);
 
-    if (cellW === 0) {
-      if (baseResult.solid) {
-        const [min, max] = baseResult.solid.boundingBox.bounds;
-        cellW = max[0] - min[0];
-        cellH = max[1] - min[1];
-      } else {
-        cellW = drawing.boundingBox.width;
-        cellH = drawing.boundingBox.height;
+      if (cellW === 0) {
+        if (baseResult.solid) {
+          const [min, max] = baseResult.solid.boundingBox.bounds;
+          cellW = max[0] - min[0];
+          cellH = max[1] - min[1];
+        } else {
+          cellW = drawing.boundingBox.width;
+          cellH = drawing.boundingBox.height;
+        }
       }
+      const dx = (i % columns) * (cellW + gap);
+      const dy = -Math.floor(i / columns) * (cellH + gap);
+
+      if (req.format === "svg") {
+        const t = drawing.translate([dx, dy]) as Drawing;
+        if (svg) {
+          const prev = svg;
+          svg = svg.fuse(t);
+          safeDeleteDrawing(prev);
+          safeDeleteDrawing(t);
+        } else {
+          svg = t;
+        }
+      } else if (req.format === "3mf") {
+        objects.push({
+          name: makeLabelStem(baseType, width, spec),
+          parts: labelParts(baseResult, drawing, req.style, depth, baseColor, labelColor, [dx, dy]),
+        });
+      } else {
+        const { solid } = extrudeLabel(baseResult, drawing, req.style, depth);
+        if (dx || dy) {
+          solids.push(solid.translate([dx, dy, 0]) as Solid);
+          safeDelete(solid); // keep only the translated copy
+        } else {
+          solids.push(solid);
+        }
+      }
+
+      // Free per-row shapes not retained for the combined output.
+      safeDeleteDrawing(drawing);
+      safeDelete(baseResult.solid);
+    } catch (e) {
+      throw new Error(`Row ${i + 1} ("${spec}"): could not generate — ${formatError(e)}`);
     }
-    const dx = (i % columns) * (cellW + gap);
-    const dy = -Math.floor(i / columns) * (cellH + gap);
-
-    if (req.format === "svg") {
-      const t = drawing.translate([dx, dy]) as Drawing;
-      if (svg) {
-        const prev = svg;
-        svg = svg.fuse(t);
-        safeDeleteDrawing(prev);
-        safeDeleteDrawing(t);
-      } else {
-        svg = t;
-      }
-    } else if (req.format === "3mf") {
-      objects.push({
-        name: makeLabelStem(baseType, width, spec),
-        parts: labelParts(baseResult, drawing, req.style, depth, baseColor, labelColor, [dx, dy]),
-      });
-    } else {
-      const { solid } = extrudeLabel(baseResult, drawing, req.style, depth);
-      if (dx || dy) {
-        solids.push(solid.translate([dx, dy, 0]) as Solid);
-        safeDelete(solid); // keep only the translated copy
-      } else {
-        solids.push(solid);
-      }
-    }
-
-    // Free per-row shapes not retained for the combined output.
-    safeDeleteDrawing(drawing);
-    safeDelete(baseResult.solid);
     postProgress(i + 1);
   }
 
@@ -654,7 +685,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     const msg: ErrorResponse = {
       id: req.id,
       type: "ERROR",
-      message: err instanceof Error ? err.message : String(err),
+      message: formatError(err),
     };
     self.postMessage(msg);
   }

@@ -53,16 +53,25 @@ export function BatchPanel({
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
+  // Defer the CSV parse + preview off the typing critical path so the textareas
+  // stay responsive while editing a large CSV/template (React keeps the input
+  // update high-priority and recomputes the derived preview in the background).
+  const deferredCsv = React.useDeferredValue(csvText);
+  const deferredTemplate = React.useDeferredValue(template);
+
   const parsed: ParsedCsv = React.useMemo(() => {
     try {
-      return parseCSV(csvText);
+      return parseCSV(deferredCsv);
     } catch {
       return { headers: [], rows: [] };
     }
-  }, [csvText]);
+  }, [deferredCsv]);
 
-  const placeholders = React.useMemo(() => extractPlaceholders(template), [template]);
-  const missingColumns = placeholders.filter((p) => !parsed.headers.includes(p));
+  const placeholders = React.useMemo(() => extractPlaceholders(deferredTemplate), [deferredTemplate]);
+  const missingColumns = React.useMemo(
+    () => placeholders.filter((p) => !parsed.headers.includes(p)),
+    [placeholders, parsed],
+  );
 
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -71,20 +80,28 @@ export function BatchPanel({
   };
 
   const handleGenerate = async () => {
-    if (parsed.rows.length === 0) {
+    // Parse the current CSV fresh — the memoised `parsed` is deferred and may
+    // lag a frame behind the textarea.
+    let rows: Record<string, string>[];
+    try {
+      rows = parseCSV(csvText).rows;
+    } catch {
+      rows = [];
+    }
+    if (rows.length === 0) {
       setError("Aucune ligne de données. Collez ou importez un CSV avec une ligne d'en-têtes.");
       return;
     }
     setError(null);
     setBusy(true);
-    setProgress({ done: 0, total: parsed.rows.length });
+    setProgress({ done: 0, total: rows.length });
     try {
       const base: BaseConfig = { baseType, width, height, depth, labelDepth, version };
       const options = { font: { font, fontStyle: FontStyle.REGULAR, fontHeightExact: true } };
       const file = await batchExport(
         {
           template,
-          rows: parsed.rows,
+          rows,
           base,
           style,
           options,
